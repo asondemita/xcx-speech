@@ -71,9 +71,9 @@
 2. 「拡張機能を追加」ボタンをクリック
 3. 「Extension Loader」拡張機能を選ぶ
 4. 入力欄にモジュールURLを入力する
-```
-https://asondemita.github.io/xcx-voice/dist/voice.mjs
-```
+   ```
+   https://asondemita.github.io/xcx-voice/dist/voice.mjs
+   ```
 5. 「OK」ボタンをクリック
 6. これでこの拡張機能のブロックが使えます
 
