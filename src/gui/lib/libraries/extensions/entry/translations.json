@@ -1,0 +1,14 @@
+{
+  "en": {
+    "voice.entry.name": "Voice",
+    "voice.entry.description": "Listen, translate, speak: recognize speech, translate it, and read text aloud with character voices."
+  },
+  "ja": {
+    "voice.entry.name": "声",
+    "voice.entry.description": "「聞く」「訳す」「話す」。音声を聞き取り、翻訳し、いろんなキャラ声で読み上げます。"
+  },
+  "ja-Hira": {
+    "voice.entry.name": "こえ",
+    "voice.entry.description": "「きく」「やくす」「はなす」。おんせいをききとり、ほんやくし、いろんなキャラごえでよみあげます。"
+  }
+}

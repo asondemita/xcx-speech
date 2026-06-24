@@ -1,0 +1,240 @@
+==============================================================================
+ Scrub 改修依頼資料 ： 音声拡張機能「声(Voice)」対応
+ ─ ①「聞き取り（音声認識）が出来ない」対応  ②「音声合成（キャラ声）」対応
+==============================================================================
+作成日: 2026-06-24
+対象アプリ: Scrub (iPad, WKWebView / ScratchWebKit)
+関係する拡張機能: xcx-voice  (https://github.com/asondemita/xcx-voice)
+  モジュールURL: https://asondemita.github.io/xcx-voice/dist/voice.mjs
+
+提出済みプルリクエスト（tfabworks/Scrub）:
+  ① 音声認識: https://github.com/tfabworks/Scrub/pull/11
+  ② 音声合成: https://github.com/tfabworks/Scrub/pull/12
+
+------------------------------------------------------------------------------
+0. 概要（3行）
+------------------------------------------------------------------------------
+- Xcratch 用の音声拡張「声(Voice)」を作成しました。「聞く（音声認識）／訳す（翻訳）
+  ／話す（音声合成）」ができます。
+- このうち「音声認識」と「音声合成」は、ブラウザの Web Speech API を使っています。
+  ところが Scrub（WKWebView）では、この2つが正しく動きません（理由は後述）。
+- 解決には Scrub アプリ側に「ネイティブ実装 → JS へブリッジ」の追加が必要です。
+  本資料はその「なぜ」と「どう直すか」をまとめたものです。
+
+
+------------------------------------------------------------------------------
+1. 前提：なぜ Scrub 側の改修が必要か
+------------------------------------------------------------------------------
+iOS/iPadOS では、すべてのブラウザ・WebView の中身が WebKit です。そして
+Web Speech API（音声認識 SpeechRecognition / 音声合成 speechSynthesis）の
+実装挙動は WebKit/OS 側に依存します。
+
+実機テストの結果（拡張は同一コード）:
+  ・純正 Safari            … 認識OK / 合成OK（ただし合成の pitch は効かない）
+  ・iOS版 Chrome           … 認識NG（aborted）
+  ・Scrub（アプリ内WebView）… 認識NG（aborted）
+
+→ つまり、Scrub で問題が起きるのは拡張機能のバグではなく、
+  「WKWebView では Web Speech API が Safari 本体と同じには動かない」という
+  プラットフォーム上の制約が原因です。JS 側では回避できません。
+
+なお Scrub の Info.plist には既に下記が入っており、権限文字列は問題ありません。
+  ・NSMicrophoneUsageDescription
+  ・NSSpeechRecognitionUsageDescription
+
+
+------------------------------------------------------------------------------
+2. 改修① 「聞き取り（音声認識）が出来ない」対応
+------------------------------------------------------------------------------
+[症状]
+  Scrub で「聞き取る」ブロックを実行すると、SpeechRecognition の onerror が
+  error="aborted" で即座に発火し、何も認識できない。
+
+[原因]
+  Apple の音声認識バックエンドは実質 Safari 本体に限定されている。WKWebView では
+  window.webkitSpeechRecognition というオブジェクトは存在するが、start() 直後に
+  「aborted」で打ち切られる（OSが認識サービスを起動しないため）。
+
+[対応方針]
+  ネイティブの SFSpeechRecognizer で認識を実装し、JS 側の
+  window.SpeechRecognition / window.webkitSpeechRecognition を、そのネイティブ実装に
+  橋渡しする「シム」に差し替える。これにより、拡張機能のコードは一切変更せずに、
+  Scrub の中でも認識が動くようになる（拡張は webkitSpeechRecognition を見ているだけ）。
+
+  実装パターンは、既存の WebMIDIKit（WebMIDI.swift）とまったく同じ方式：
+    1) WKUserScript で JS シムを documentStart に注入
+    2) WKScriptMessageHandler で JS → ネイティブのメッセージを受信
+    3) webView.evaluateJavaScript(...) でネイティブ → JS に結果を返す
+
+[配置場所]
+  ScratchWebKit パッケージ内（= 既に組み込まれている。Xcodeプロジェクト改変は不要）
+    新規: Sources/ScratchWebKit/WebSpeech.swift
+    新規: Sources/ScratchWebKit/Resources/speech-inject.js
+    編集: Sources/ScratchWebKit/ScratchWebViewController.swift（3行）
+
+[ScratchWebViewController.swift への配線（3行）]
+    private let webSpeech = WebSpeech()                    // プロパティ追加
+    ...
+    webSpeech.setup(webView: webView)                      // init 内（webMidi.setup の隣）
+    ...
+    // 画面遷移時に認識を止める（webMidi.reset() の隣）
+    webSpeech.reset()                                      // didStartProvisionalNavigation 内
+
+[WebSpeech.swift の要点]
+  ・SFSpeechRecognizer + AVAudioEngine（マイク入力をタップして認識リクエストに供給）
+  ・メッセージ名: speechStart / speechStop / speechAbort
+  ・権限: SFSpeechRecognizer.requestAuthorization と録音許可
+      iOS 17+: AVAudioApplication.requestRecordPermission
+      それ以前: AVAudioSession.requestRecordPermission（#available で分岐）
+  ・無音 ~1.6秒で自動確定、~6秒で no-speech 終了（Web Speech の非連続モード相当）
+  ・結果/エラー/終了を window.WebSpeechKit.coordinator.receiveXxx(...) でJSへ返す
+
+[speech-inject.js の要点]
+  ・window.SpeechRecognition / window.webkitSpeechRecognition を、ネイティブへ
+    postMessage するクラスに置き換える（lang / interimResults / continuous /
+    onresult / onerror / onend に対応）
+  ・onresult の event.results[i][0].transcript / isFinal を組み立てて拡張へ渡す
+
+[重要] 実装は プルリクエスト #11 として提出済みです
+  上記2ファイル＋配線の実装一式を Pull Request にしています（動作未確認・実機ビルド前）。
+  PR:     https://github.com/tfabworks/Scrub/pull/11
+  ブランチ: feature/native-speech-recognition（ベース: main）
+  ※ こちらの環境に iOS SDK が無くビルド検証ができていないため、Xcode（実機 iPad）での
+    ビルド確認をお願いします。型エラー等が出た場合は対応します。
+
+
+------------------------------------------------------------------------------
+3. 改修② 「音声合成（キャラ声）」対応
+------------------------------------------------------------------------------
+  実装は プルリクエスト #12 として提出済み: https://github.com/tfabworks/Scrub/pull/12
+  （以下は背景と設計の説明。実コードは PR を参照してください）
+
+[症状]
+  「声を [ネコ/ネズミ/巨人/…] にする」キャラ声プリセットを使っても、Mac・iPad
+  （Safari/Apple音声）では声の「高さ(pitch)」がほとんど変わらない（速さは変わる）。
+
+[原因]
+  キャラ声は SpeechSynthesisUtterance の pitch（高さ）と rate（速さ）を変えて作って
+  いるが、Apple の TTS 音声は Web Speech API の pitch をほぼ無視する（rate は有効）。
+  → Windows(Chrome/Edge, SAPI)では pitch が効くが、Mac/iPad では効かない。
+  ※ 日本の学校端末は Chromebook・iPad が中心（Windows は1割程度）のため、多くの
+    子どもがキャラ声の違いを体験できない可能性が高い。これが改修②の動機です。
+
+[対応方針]
+  ネイティブの AVSpeechSynthesizer で発話する（pitchMultiplier が本当に効く）。
+  JS 側の window.speechSynthesis と SpeechSynthesisUtterance を、そのネイティブ実装へ
+  橋渡しするシムに差し替える。拡張機能のコードは変更不要（speechSynthesis を見ている）。
+  ※ 認識（改修①）と完全に同じ注入パターン。実装量は認識よりかなり少ない
+    （マイク権限・AudioEngine・タイマー・複雑なエラー処理が不要なため）。
+
+[配置場所]
+    新規: Sources/ScratchWebKit/WebSpeechSynth.swift（目安 120〜150行）
+    新規: Sources/ScratchWebKit/Resources/synth-inject.js（目安 120行）
+    編集: ScratchWebViewController.swift（webSpeechSynth.setup / reset を各1行）
+
+[WebSpeechSynth.swift の骨子（イメージ）]
+    import WebKit
+    import AVFoundation
+
+    public class WebSpeechSynth: NSObject, AVSpeechSynthesizerDelegate {
+        private weak var webView: WKWebView?
+        private let synthesizer = AVSpeechSynthesizer()
+        private var currentId: Int = 0
+
+        public func setup(webView: WKWebView) {
+            // synth-inject.js を WKUserScript で documentStart 注入
+            // userContentController.add(self, name: "synthSpeak" / "synthCancel")
+            self.webView = webView
+            synthesizer.delegate = self
+        }
+        public func reset() { synthesizer.stopSpeaking(at: .immediate) }
+
+        // JS → ネイティブ
+        public func userContentController(_ ucc: WKUserContentController,
+                                          didReceive message: WKScriptMessage) {
+            guard let p = message.body as? [String: Any] else { return }
+            switch message.name {
+            case "synthSpeak":
+                let id   = p["id"] as? Int ?? 0
+                let text = p["text"] as? String ?? ""
+                let lang = p["lang"] as? String ?? "ja-JP"
+                let pitch = p["pitch"] as? Double ?? 1.0  // Web Speech: 0〜2
+                let rate  = p["rate"]  as? Double ?? 1.0  // Web Speech: 0.1〜10（既定1）
+                currentId = id
+                synthesizer.stopSpeaking(at: .immediate)
+                let u = AVSpeechUtterance(string: text)
+                u.voice = AVSpeechSynthesisVoice(language: lang)
+                // pitchMultiplier の有効範囲は 0.5〜2.0（巨人=0.4 は 0.5 にクランプ）
+                u.pitchMultiplier = Float(min(2.0, max(0.5, pitch)))
+                // rate のスケール変換（Web Speech → AVSpeechUtterance 0〜1, 既定≈0.5）
+                let avRate = Double(AVSpeechUtteranceDefaultSpeechRate) * rate
+                u.rate = Float(min(Double(AVSpeechUtteranceMaximumSpeechRate),
+                                   max(Double(AVSpeechUtteranceMinimumSpeechRate), avRate)))
+                synthesizer.speak(u)
+            case "synthCancel":
+                synthesizer.stopSpeaking(at: .immediate)
+            default: break
+            }
+        }
+
+        // ネイティブ → JS（発話終了を通知）
+        public func speechSynthesizer(_ s: AVSpeechSynthesizer,
+                                      didFinish utterance: AVSpeechUtterance) {
+            let id = currentId
+            DispatchQueue.main.async { [weak self] in
+                self?.webView?.evaluateJavaScript(
+                  "window.WebSpeechSynthKit && WebSpeechSynthKit.coordinator.receiveEnd(\(id))")
+            }
+        }
+    }
+
+[synth-inject.js の骨子]
+  ・window.speechSynthesis を { speak(u), cancel(), getVoices() } のシムに置き換え
+  ・window.SpeechSynthesisUtterance を、text / lang / pitch / rate / voice / onend /
+    onerror を持つコンストラクタに置き換え
+  ・speak(u) で {id, text, lang, pitch, rate} を webkit.messageHandlers.synthSpeak へ
+    postMessage。receiveEnd(id) で該当 utterance の onend を発火
+  ・getVoices() は [] を返してOK（拡張側は voice 未設定時、lang からネイティブが既定音声を
+    選ぶ実装にしているため問題なし）
+
+[ポイント]
+  ・拡張側のキャラ声プリセットは「pitch×rate の倍率」を speechSynthesis に渡しているだけ
+    なので、ネイティブ側で pitchMultiplier を適用すれば iPad でもキャラ声が効く。
+  ・iOS の AVSpeechSynthesizer は最初の発話に user-gesture を必要としない（認識と違い扱い易い）。
+
+
+------------------------------------------------------------------------------
+4. 共通事項・確認のお願い
+------------------------------------------------------------------------------
+[メモリ]
+  ①②とも OS 内蔵エンジン（SFSpeechRecognizer / AVSpeechSynthesizer）を使うだけで、
+  アプリにモデルを読み込みません。メモリ消費はごくわずかで、低スペックなGIGA端末でも
+  問題ありません（ニューラルTTS等の重いモデルは一切使いません）。
+
+[対象 iOS]
+  iPadOS 17 以降を主対象（録音許可APIのみ #available で分岐済み。14.5でも動作可能）。
+
+[影響範囲・互換性]
+  ・JS シムは Scrub 全体（メインフレーム）の SpeechRecognition / speechSynthesis を
+    置き換えますが、他の拡張やページがこれらを使っても「ネイティブで動く」だけで
+    悪影響はありません。
+  ・既存の WebMIDIKit と同じ注入方式なので、設計上の整合性も取れています。
+
+[テスト方法（実機 iPad 17+）]
+  1) Scrub をビルド＆実機にインストール（scheme: Scrub）
+  2) 初回に「音声認識」「マイク」の許可ダイアログ → 許可
+  3) Xcratch エディタで xcx-voice を読み込み:
+     ・改修① 「聞き取る」→「聞き取った言葉」で認識できること（認識エラーにならない）
+     ・改修② 「声を [ネズミ/巨人] にする」→「[テキスト] と話す」で声の高さが変わること
+
+[お願いしたいこと]
+  ・改修①②とも、プルリクエスト（#11 / #12）として提出済みです。
+    Xcode（実機 iPad）でのビルド・動作確認とレビューをお願いします。
+    型エラー等が出た場合は共有ください、こちらで対応します。
+  ・①②は独立した変更ですが、どちらも ScratchWebViewController.swift の同じ箇所に行を
+    追加するため、両方マージする際に軽微なコンフリクトが出る可能性があります（隣接行の追加）。
+
+------------------------------------------------------------------------------
+連絡先 / 補足: 拡張機能側（xcx-voice）は変更不要です。Scrub 側のブリッジが入れば、
+そのまま Scrub 内で認識・キャラ声が動作します。
+==============================================================================
