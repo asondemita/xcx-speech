@@ -2,10 +2,15 @@
   "extensionId": "voice",
   "versions": [
     {
+      "version": "1.0.1",
+      "buildDate": "2026-06-25T06:17:43.154Z",
+      "module": "1.0.1/voice.mjs"
+    },
+    {
       "version": "1.0.0",
       "buildDate": "2026-06-24T02:10:39.722Z",
       "module": "1.0.0/voice.mjs"
     }
   ],
-  "latest": "1.0.0"
+  "latest": "1.0.1"
 }
