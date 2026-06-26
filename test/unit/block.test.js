@@ -76,6 +76,33 @@ describe("blockClass", () => {
         expect(block.isAcceptableResult("りんご", 0.8)).toBe(true);
     });
 
+    test("default mic sensitivity is normal (threshold 0.5)", () => {
+        const block = new blockClass(runtime);
+        expect(block.micSensitivity).toBe("normal");
+        expect(block.confidenceThreshold).toBe(0.5);
+    });
+
+    test("setMicSensitivity changes the confidence threshold", () => {
+        const block = new blockClass(runtime);
+        // Low sensitivity is the strictest (best in noisy rooms).
+        block.setMicSensitivity({LEVEL: "low"});
+        expect(block.micSensitivity).toBe("low");
+        expect(block.confidenceThreshold).toBe(0.8);
+        expect(block.isAcceptableResult("りんご", 0.6)).toBe(false);
+        // High sensitivity accepts even low-confidence results.
+        block.setMicSensitivity({LEVEL: "high"});
+        expect(block.confidenceThreshold).toBe(0);
+        expect(block.isAcceptableResult("りんご", 0.1)).toBe(true);
+    });
+
+    test("setMicSensitivity falls back to normal for unknown values", () => {
+        const block = new blockClass(runtime);
+        block.setMicSensitivity({LEVEL: "low"});
+        block.setMicSensitivity({LEVEL: "bogus"});
+        expect(block.micSensitivity).toBe("normal");
+        expect(block.confidenceThreshold).toBe(0.5);
+    });
+
     test("listenAndWait clears the previous result before a new attempt", () => {
         const block = new blockClass(runtime);
         block.latestSpeech = "りんご";

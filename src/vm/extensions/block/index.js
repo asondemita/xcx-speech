@@ -79,11 +79,31 @@ const toSynthLocale = tag => {
 const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
 
 /**
- * Reject a recognition result whose reported confidence is positive but below
- * this value. (Some engines report 0 = "unknown"; those are not rejected here.)
+ * Confidence thresholds for each microphone-sensitivity level. A recognition
+ * result whose reported confidence is positive but below the active threshold
+ * is rejected. A higher threshold rejects more low-confidence (often noisy)
+ * results, so "low" sensitivity is the strictest — useful in noisy rooms.
+ * (Some engines report 0 = "unknown"; those are never rejected here.)
+ * @type {Object<string, number>}
+ */
+const SENSITIVITY_THRESHOLDS = {
+    high: 0,
+    normal: 0.5,
+    low: 0.8
+};
+
+/**
+ * Default microphone-sensitivity level.
+ * @type {string}
+ */
+const DEFAULT_SENSITIVITY = 'normal';
+
+/**
+ * Number of recognition alternatives to request. The first acceptable one is
+ * kept, so a noisy top candidate can fall back to a cleaner alternative.
  * @type {number}
  */
-const CONFIDENCE_THRESHOLD = 0.5;
+const MAX_ALTERNATIVES = 3;
 
 /**
  * Minimum number of characters required for a result to be accepted.
@@ -233,6 +253,19 @@ class ExtensionBlocks {
         this.autoTranslate = false;
 
         /**
+         * The current microphone-sensitivity level (key of
+         * SENSITIVITY_THRESHOLDS).
+         * @type {string}
+         */
+        this.micSensitivity = DEFAULT_SENSITIVITY;
+
+        /**
+         * The confidence threshold derived from the current sensitivity level.
+         * @type {number}
+         */
+        this.confidenceThreshold = SENSITIVITY_THRESHOLDS[DEFAULT_SENSITIVITY];
+
+        /**
          * The recognition instance currently running, if any.
          * @type {?SpeechRecognition}
          */
@@ -318,6 +351,23 @@ class ExtensionBlocks {
                                 default: 'hello',
                                 description: 'default value of the word argument'
                             })
+                        }
+                    }
+                },
+                {
+                    opcode: 'setMicSensitivity',
+                    blockType: BlockType.COMMAND,
+                    text: formatMessage({
+                        id: 'voice.setMicSensitivity',
+                        default: 'set microphone sensitivity to [LEVEL]',
+                        description: 'set how strictly noisy / low-confidence results are rejected'
+                    }),
+                    func: 'setMicSensitivity',
+                    arguments: {
+                        LEVEL: {
+                            type: ArgumentType.STRING,
+                            menu: 'sensitivityMenu',
+                            defaultValue: DEFAULT_SENSITIVITY
                         }
                     }
                 },
@@ -515,6 +565,10 @@ class ExtensionBlocks {
                 onOffMenu: {
                     acceptReporters: true,
                     items: 'getOnOffMenu'
+                },
+                sensitivityMenu: {
+                    acceptReporters: true,
+                    items: 'getSensitivityMenu'
                 }
             }
         };
@@ -533,6 +587,39 @@ class ExtensionBlocks {
             {
                 text: formatMessage({id: 'voice.off', default: 'off', description: 'off'}),
                 value: 'off'
+            }
+        ];
+    }
+
+    /**
+     * Build the microphone-sensitivity menu.
+     * @returns {Array<object>} - menu items
+     */
+    getSensitivityMenu () {
+        return [
+            {
+                text: formatMessage({
+                    id: 'voice.sensitivity.high',
+                    default: 'high',
+                    description: 'high microphone sensitivity'
+                }),
+                value: 'high'
+            },
+            {
+                text: formatMessage({
+                    id: 'voice.sensitivity.normal',
+                    default: 'normal',
+                    description: 'normal microphone sensitivity'
+                }),
+                value: 'normal'
+            },
+            {
+                text: formatMessage({
+                    id: 'voice.sensitivity.low',
+                    default: 'low',
+                    description: 'low microphone sensitivity'
+                }),
+                value: 'low'
             }
         ];
     }
@@ -628,6 +715,21 @@ class ExtensionBlocks {
      */
     setAutoTranslate (args) {
         this.autoTranslate = (Cast.toString(args.STATE).toLowerCase() === 'on');
+    }
+
+    /**
+     * Set the microphone sensitivity, which controls how strictly noisy /
+     * low-confidence results are rejected. Lower sensitivity uses a higher
+     * confidence threshold, so it is the most noise-resistant. Unknown values
+     * fall back to the default level.
+     * @param {object} args - the block's arguments.
+     * @param {string} args.LEVEL - 'high', 'normal' or 'low'.
+     */
+    setMicSensitivity (args) {
+        const level = Cast.toString(args.LEVEL).toLowerCase();
+        this.micSensitivity = Object.prototype.hasOwnProperty.call(SENSITIVITY_THRESHOLDS, level) ?
+            level : DEFAULT_SENSITIVITY;
+        this.confidenceThreshold = SENSITIVITY_THRESHOLDS[this.micSensitivity];
     }
 
     /**
@@ -891,7 +993,7 @@ class ExtensionBlocks {
             recognition.lang = this.recognitionLanguage;
             recognition.interimResults = false;
             recognition.continuous = false;
-            recognition.maxAlternatives = 1;
+            recognition.maxAlternatives = MAX_ALTERNATIVES;
 
             const finish = () => {
                 this.recognition = null;
@@ -901,9 +1003,19 @@ class ExtensionBlocks {
             recognition.onresult = event => {
                 const result = event.results[event.results.length - 1];
                 if (result && result[0]) {
-                    const transcript = result[0].transcript.trim();
-                    if (this.isAcceptableResult(transcript, result[0].confidence)) {
-                        this.latestSpeech = transcript;
+                    // Keep the first alternative that passes the noise filter, so
+                    // a noisy top candidate can fall back to a cleaner one.
+                    let accepted = null;
+                    for (let i = 0; i < result.length; i++) {
+                        const alt = result[i];
+                        const transcript = alt.transcript.trim();
+                        if (this.isAcceptableResult(transcript, alt.confidence)) {
+                            accepted = transcript;
+                            break;
+                        }
+                    }
+                    if (accepted) {
+                        this.latestSpeech = accepted;
                     } else {
                         // Treat noisy / low-confidence / symbol-only results as nothing heard.
                         this.lastError = 'noise-filtered';
@@ -947,7 +1059,7 @@ class ExtensionBlocks {
         if (text.length < MIN_LENGTH || !MEANINGFUL_CHAR.test(text)) {
             return false;
         }
-        if (typeof confidence === 'number' && confidence > 0 && confidence < CONFIDENCE_THRESHOLD) {
+        if (typeof confidence === 'number' && confidence > 0 && confidence < this.confidenceThreshold) {
             return false;
         }
         return true;
